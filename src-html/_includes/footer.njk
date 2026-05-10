@@ -1,0 +1,16 @@
+<footer class="footer">
+    <div class="footer-links blog homepage-only">
+    {% for post in collections.blog %}
+<a href="{{ post.url | httpUrl }}">{{ post.data.link_title or post.data.title }}</a>
+    {% endfor %}
+    </div>
+    <div class="footer-container">
+      <div class="footer-brand">
+        <strong>qrr.app</strong> &copy; 2026<br />
+        Built for fast sharing.
+      </div>
+      <div class="footer-links">
+        <a href="{{ '/terms' | httpUrl }}">Terms of Service</a>
+      </div>
+    </div>
+  </footer>

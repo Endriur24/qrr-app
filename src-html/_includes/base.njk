@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <link rel="preload" href="../static/styles.css" as="style">
+  <link rel="preload" as="font" type="font/woff2" crossorigin
+    href="https://fonts.bunny.net/pacifico/files/pacifico-latin-400-normal.woff2">
+  {% if page.url == '/' %}
+    <link rel="preload" href="../static/client.js" as="script">  
+    <link rel="preload" as="font" type="font/woff2" crossorigin
+    href="https://fonts.gstatic.com/s/materialicons/v143/flUhRq6tzZclQEJ-Vdg-IuiaDsNc.woff2">
+  {% endif %}
+  <title>{{ title | default("qrr.app - fast sharing without login") }}</title>
+  <link rel="icon" href="/favicon.ico" />
+  <meta charset="utf-8" />
+  <meta content="width=device-width, initial-scale=1" name="viewport" />
+  <meta name="description" content="{{ meta_description or description | default("A simple way to send files and messages - qrr.app") }}" />
+  <meta property="og:title" content="{{ ogTitle | default("qrr.app") }}" />
+  <meta property="og:description" content="{{ ogDescription | default("A simple way to send files, texts and links across platforms") }}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://qrr.app" />
+  <meta property="og:image" content="https://qrr.app/image/qrr_app_just_browser.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ twitterTitle | default("qrr.app") }}" />
+  <meta name="twitter:description" content="{{ twitterDescription | default("A simple way to send files and texts") }}" />
+  <meta name="twitter:image" content="https://qrr.app/image/qrr_app_just_browser.png" />
+  <link rel="canonical" href="{{ page.url | httpUrl }}" />
+  <link rel="sitemap" type="application/xml" title="Sitemap" href="https://qrr.app/sitemap.xml" />
+  <link rel="manifest" href="../app.webmanifest" />
+  <link rel="stylesheet" href="../static/styles.css" />
+  {# <script src="https://cdn.jsdelivr.net/npm/eruda"></script><script>eruda.init();</script> #}
+  {% if page.url == '/' %}
+    <script src="../static/client.js" defer></script>
+  {% endif %}
+</head>
+
+<body>
+  <button class="theme-toggle icon" data-theme-toggle aria-label="Change to light theme"></button>
+  {% block content %}{% endblock %}
+  {% if page.url == '/' or page.url == '/404/' %}
+    {{ content | safe }}
+  {% endif %}
+  
+
+  {% include "footer.njk" %}
+
+  {% include "dark_mode_script.njk" %}
+  {% if page.url == '/' %}
+    {% include "tile_scroll_script.njk" %}
+  {% endif %}
+  
+</body>
+</html>

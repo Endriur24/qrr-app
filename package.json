@@ -1,0 +1,33 @@
+{
+	"name": "qrr-app",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"deploy": "vite build && eleventy && wrangler deploy",
+		"dev": "npm-run-all --parallel 11-dev vite-dev wrangler-dev",
+		"vite-dev": "vite build --emptyOutDir false --watch",
+		"11-dev": "eleventy --serve",
+		"wrangler-dev": "wrangler dev --port 8000",
+		"build": "vite build"
+	},
+	"devDependencies": {
+		"@11ty/eleventy": "^3.1.2",
+		"@cloudflare/workers-types": "^4.20241230.0",
+		"luxon": "^3.7.1",
+		"npm-run-all": "^4.1.5",
+		"vite": "^6.0.7",
+		"wrangler": "^4.43.0"
+	},
+	"dependencies": {
+		"@hono/node-server": "^1.19.5",
+		"@hono/zod-validator": "^0.7.4",
+		"@types/js-cookie": "^3.0.6",
+		"@types/qrcode": "^1.5.5",
+		"hono": "^4.10.1",
+		"js-cookie": "^3.0.5",
+		"qrcode": "^1.5.4",
+		"qrcode.react": "^4.2.0",
+		"react-otp-input": "^3.1.1"
+	}
+}

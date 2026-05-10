@@ -1,0 +1,44 @@
+{
+	"icons": [
+		{
+			"src": "/icons/android-chrome-192x192.png",
+			"sizes": "192x192",
+			"type": "image/png"
+		},
+		{
+			"src": "/icons/android-chrome-512x512.png",
+			"sizes": "512x512",
+			"type": "image/png"
+		},
+		{
+			"src": "/icons/android-chrome-512x512.png",
+			"type": "image/png",
+			"sizes": "512x512",
+			"purpose": "maskable"
+		}
+	],
+	"share_target": {
+		"action": "/receive-files/",
+		"method": "POST",
+		"enctype": "multipart/form-data",
+		"params": {
+			"files": [
+				{
+					"name": "media",
+					"accept": ["*/*"]
+				}
+			],
+			"title": "name",
+			"text": "description",
+			"url": "link"
+		}
+	},
+	"display": "standalone",
+	"name": "qrr.app",
+	"short_name": "qrr.app",
+	"theme_color": "#5c6bc0",
+	"background_color": "#f5f5f7",
+	"orientation": "portrait",
+	"scope": "/",
+	"start_url": "https://qrr.app/"
+}

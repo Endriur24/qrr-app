@@ -1,0 +1,20 @@
+---
+layout: base.njk
+title: 404 - page does not exist
+description: The page you are looking for does not exist or has been moved
+sitemapIgnore: true
+---
+
+{% block content %}
+<a href="{{ '/' | httpUrl }}" class="logo-link">
+		<h2 class="mid logo">qrr.app</h2>
+	</a>
+
+<h1>
+  404 - page does not exist
+</h1>
+<p>The page you are looking for does not exist or has been moved</p>
+
+
+
+{% endblock %}

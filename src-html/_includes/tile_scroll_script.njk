@@ -1,0 +1,14 @@
+<script>
+     // Scroll animation for tiles
+    const tiles = document.querySelectorAll('.tile');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('animate');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.1 });
+
+    tiles.forEach(tile => observer.observe(tile));
+  </script>

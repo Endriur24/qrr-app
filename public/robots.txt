@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /getid
+Disallow: /checkid
+Sitemap: https://qrr.app/sitemap.xml
