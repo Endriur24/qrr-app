@@ -9,7 +9,7 @@
 		"vite-dev": "vite build --emptyOutDir false --watch",
 		"11-dev": "eleventy --serve",
 		"wrangler-dev": "wrangler dev --port 8000",
-		"build": "vite build"
+		"build": "vite build && eleventy"
 	},
 	"devDependencies": {
 		"@11ty/eleventy": "^3.1.2",

@@ -4,7 +4,8 @@ export default function (eleventyConfig) {
 	eleventyConfig.addFilter("httpUrl", (url) => {
 		if (!url) return "/";
 		if (url.startsWith("http")) return url;
-		return `https://qrr.app${url}`;
+		const clean = url.replace(/\.html$/, "");
+		return `https://qrr.app${clean}`;
 	});
 
 	eleventyConfig.addFilter("dateDisplayNow", () => {
