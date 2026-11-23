@@ -4,6 +4,17 @@ import { zValidator } from "@hono/zod-validator";
 import { DurableObject } from "cloudflare:workers";
 import { getCookie } from "hono/cookie";
 
+/**
+ * Max total size of files kept in a single session (must match client limit).
+ * Files live only in RAM; a Durable Object isolate has 128 MB in total, so we
+ * leave headroom for the runtime, in-flight upload chunks and responses.
+ */
+export const MAX_TOTAL_SIZE = 80 * 1024 * 1024;
+/** Incomplete uploads with no activity for this long stop reserving space */
+const STALE_UPLOAD_MS = 1000 * 60 * 5;
+/** Grace period used while host has the native file picker open */
+const PICKER_HOLD_MS = 1000 * 60 * 5;
+
 // Schema definitions
 /** Schema for send message validation */
 export const sendSchema = z.object({
@@ -17,23 +28,31 @@ export const uploadSchema = z.object({
   icon: z.string().optional(),
 });
 
+const fileInfoSchema = z.object({
+  name: z.string().max(1024).default("file"),
+  type: z.string().max(255).default(""),
+  size: z.number().int().nonnegative(),
+  thumbnail: z.string().max(200_000).nullable().optional(),
+  icon: z.string().max(32).optional(),
+});
+
 /** Schema for chunk upload validation */
 export const chunkUploadSchema = z.object({
   chunk: z.instanceof(Blob),
-  fileId: z.string(),
-  index: z.string().transform(val => parseInt(val, 10)),
-  totalChunks: z.string().transform(val => parseInt(val, 10)),
-  fileInfo: z.string().transform(val => {
-    const parsed = JSON.parse(val);
-    return {
-      name: parsed.name,
-      type: parsed.type,
-      size: parsed.size,
-      thumbnail: parsed.thumbnail,
-      icon: parsed.icon,
-    };
+  fileId: z.uuid(),
+  index: z.coerce.number().int().nonnegative(),
+  totalChunks: z.coerce.number().int().positive().max(10_000),
+  fileInfo: z.string().transform((val, ctx) => {
+    try {
+      return fileInfoSchema.parse(JSON.parse(val));
+    } catch {
+      ctx.addIssue({ code: "custom", message: "Invalid fileInfo" });
+      return z.NEVER;
+    }
   }),
 });
+
+type FileInfoInput = z.infer<typeof fileInfoSchema>;
 
 /**
  * Connection metadata for WebSocket connections
@@ -43,32 +62,30 @@ export interface Connection {
   ws: WebSocket;
 }
 
-/**
- * File data structure for uploaded files
- */
-export interface FileData {
-  data: ArrayBuffer;
+/** Public file metadata broadcast to clients */
+export interface FileMeta {
+  id: string;
+  name: string;
   size: number;
   type: string;
-  name: string;
   thumbnail: string | null;
   icon?: string;
 }
 
-/**
- * Chunk data structure for file chunks
- */
-interface ChunkData {
-  chunks: ArrayBuffer[];
+/** File kept in memory as the list of uploaded chunks (never concatenated) */
+interface StoredFile {
+  meta: FileMeta;
   totalChunks: number;
-  receivedChunks: number;
-  fileInfo: {
-    name: string;
-    type: string;
-    size: number;
-    thumbnail: string | null;
-    icon?: string;
-  };
+  chunks: (ArrayBuffer | undefined)[];
+  received: number;
+  complete: boolean;
+  lastActivity: number;
+}
+
+class UploadError extends Error {
+  constructor(message: string, public status: 400 | 409 | 413) {
+    super(message);
+  }
 }
 
 type Variables = {
@@ -76,14 +93,32 @@ type Variables = {
 };
 
 /**
- * MessageHub Durable Object for handling WebSocket messaging and file transfers
+ * Encodes a filename for the Content-Disposition header (RFC 6266 / RFC 5987).
+ * Header values must be Latin-1, so non-ASCII names (e.g. Polish letters) would
+ * otherwise throw and make the download fail.
+ */
+const contentDisposition = (name: string): string => {
+  const fallback = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "file";
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+};
+
+/**
+ * MessageHub Durable Object for handling WebSocket messaging and file transfers.
+ *
+ * Files are never written to disk – they only live in this object's memory and
+ * disappear together with the session. To stay well below the 128 MB isolate
+ * limit, files are kept as the list of uploaded chunks (no second copy made by
+ * concatenating them) and downloads stream those chunks directly.
  */
 export class QrrAppDO extends DurableObject {
   public app: Hono<{ Variables: Variables }>;
   public connections: Connection[] = [];
   public message = "";
-  public files = new Map<string, FileData>();
-  public fileChunks = new Map<string, ChunkData>();
+  public files = new Map<string, StoredFile>();
   public initialized = false;
   public hostCode = Math.floor(Math.random() * 10000000)
     .toString()
@@ -93,19 +128,22 @@ export class QrrAppDO extends DurableObject {
 
   constructor(state: DurableObjectState, env: {}) {
     super(state, env);
-    this.ctx = state;
 
+    // Only session flags are (temporarily) persisted while the host has the
+    // file picker open – never file contents.
     this.ctx.blockConcurrencyWhile(async () => {
       this.initialized = (await this.ctx.storage.get("initialized")) || false;
       this.hostCode = (await this.ctx.storage.get("hostCode")) || this.hostCode;
       this.hostsMode = (await this.ctx.storage.get("hostsMode")) || "auto";
     });
 
-    // Initialize routes
     this.app = createMessageHubRoutes(this);
   }
 
   public setInitialized(): string {
+    this.files.clear();
+    this.message = "";
+    this.hostsMode = "auto";
     this.initialized = true;
     return this.hostCode;
   }
@@ -129,28 +167,35 @@ export class QrrAppDO extends DurableObject {
     return this.hostsMode === "send" ? "receive" : "send";
   }
 
+  public listFiles(): FileMeta[] {
+    const list: FileMeta[] = [];
+    for (const file of this.files.values()) {
+      if (file.complete) list.push(file.meta);
+    }
+    return list;
+  }
+
+  public getFile(fileId: string): StoredFile | undefined {
+    return this.files.get(fileId);
+  }
+
   public broadcast(code: number = 200, statusMessage: string = "OK"): void {
-    this.connections.forEach((connection) => {
-      const mode = this.getConnectionMode(connection);
-      const data = JSON.stringify({
-        status: {
-          code,
-          message: statusMessage,
-        },
-        role: connection.role,
-        mode,
-        message: this.message,
-        files: Array.from(this.files.entries()).map(([id, file]) => ({
-          id,
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          thumbnail: file.thumbnail,
-          icon: file.icon,
-        })),
-      });
-      connection.ws.send(data);
-    });
+    if (this.connections.length === 0) return;
+    // File list is identical for everyone – serialize it once
+    const files = JSON.stringify(this.listFiles());
+    const message = JSON.stringify(this.message);
+    const status = JSON.stringify({ code, message: statusMessage });
+
+    for (const connection of [...this.connections]) {
+      const data = `{"status":${status},"role":${JSON.stringify(connection.role)},"mode":${JSON.stringify(
+        this.getConnectionMode(connection)
+      )},"message":${message},"files":${files}}`;
+      try {
+        connection.ws.send(data);
+      } catch {
+        this.connections = this.connections.filter((c) => c !== connection);
+      }
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -169,28 +214,26 @@ export class QrrAppDO extends DurableObject {
       });
     }
 
-    let currentRole: "host" | "guest" = "guest";
-    if (sessionHost == this.hostCode) {
-      currentRole = "host";
-    }
-
     const connection: Connection = {
-      role: currentRole,
+      role: sessionHost === this.hostCode ? "host" : "guest",
       ws: server,
     };
     this.connections.push(connection);
 
     server.addEventListener("message", (event) => {
-      this.webSocketMessage(server, event.data);
+      this.webSocketMessage(server, event.data as string);
     });
 
-    server.addEventListener("close", () => {
-      console.log("WebSocket closed");
+    const onClose = () => {
       this.connections = this.connections.filter((conn) => conn.ws !== server);
-      //force connection close
-      server.close(1000, "Connection closed by client");
-
-    });
+      try {
+        server.close(1000, "Connection closed by client");
+      } catch {
+        // already closed
+      }
+    };
+    server.addEventListener("close", onClose);
+    server.addEventListener("error", onClose);
 
     this.broadcast(200, "Initial state");
 
@@ -212,12 +255,8 @@ export class QrrAppDO extends DurableObject {
       switch (parsedMessage.type) {
         case "changeMode":
           if (connection.role === "host") {
-            if (parsedMessage.mode === "auto") {
-              this.hostsMode = "auto";
-            } else if (parsedMessage.mode === "send") {
-              this.hostsMode = "send";
-            } else if (parsedMessage.mode === "receive") {
-              this.hostsMode = "receive";
+            if (["auto", "send", "receive"].includes(parsedMessage.mode)) {
+              this.hostsMode = parsedMessage.mode;
             } else {
               console.error("Unknown mode:", parsedMessage.mode);
             }
@@ -225,11 +264,15 @@ export class QrrAppDO extends DurableObject {
           break;
 
         case "pickerHold":
+          // Host opens the native file picker – mobile browsers often drop the
+          // socket, so keep the session flags in case the object gets evicted.
           if (connection.role === "host") {
-            await this.ctx.storage.put("initialized", this.initialized);
-            await this.ctx.storage.put("hostCode", this.hostCode);
-            await this.ctx.storage.put("hostsMode", this.hostsMode);
-            this.ctx.storage.setAlarm(Date.now() + 1000 * 60 * 5);
+            await this.ctx.storage.put({
+              initialized: this.initialized,
+              hostCode: this.hostCode,
+              hostsMode: this.hostsMode,
+            });
+            await this.ctx.storage.setAlarm(Date.now() + PICKER_HOLD_MS);
           } else {
             ws.send("Only host can hold");
           }
@@ -239,7 +282,6 @@ export class QrrAppDO extends DurableObject {
           if (connection.role === "host") {
             await this.ctx.storage.deleteAll();
             await this.ctx.storage.deleteAlarm();
-            console.log("Storage cleared and alarm deleted");
           }
           break;
       }
@@ -256,49 +298,112 @@ export class QrrAppDO extends DurableObject {
     return this.message;
   }
 
-  async handleChunkUpload(fileId: string, chunk: ArrayBuffer, index: number, totalChunks: number, fileInfo: ChunkData['fileInfo']): Promise<boolean> {
-    if (!this.fileChunks.has(fileId)) {
-      this.fileChunks.set(fileId, {
-        chunks: new Array(totalChunks),
-        totalChunks,
-        receivedChunks: 0,
-        fileInfo,
-      });
-    }
-
-    const chunkData = this.fileChunks.get(fileId)!;
-    chunkData.chunks[index] = chunk;
-    chunkData.receivedChunks++;
-
-    if (chunkData.receivedChunks === totalChunks) {
-      // All chunks received, assemble the file
-      const completeFileData = new Uint8Array(fileInfo.size);
-      let offset = 0;
-      for (const chunk of chunkData.chunks) {
-        completeFileData.set(new Uint8Array(chunk), offset);
-        offset += chunk.byteLength;
+  /** Bytes used/reserved by files (abandoned incomplete uploads are dropped) */
+  private usedBytes(): number {
+    const now = Date.now();
+    let total = 0;
+    for (const [id, file] of this.files) {
+      if (!file.complete && now - file.lastActivity > STALE_UPLOAD_MS) {
+        this.files.delete(id);
+        continue;
       }
+      total += file.meta.size;
+    }
+    return total;
+  }
 
-      // Store the complete file
-      this.files.set(fileId, {
-        data: completeFileData.buffer,
-        size: fileInfo.size,
-        type: fileInfo.type,
-        name: fileInfo.name,
-        thumbnail: fileInfo.thumbnail,
-        icon: fileInfo.icon,
-      });
-
-      // Clean up chunks
-      this.fileChunks.delete(fileId);
-      this.broadcast();
-      return true;
+  /**
+   * Stores one chunk of a file. Idempotent – a retried chunk simply replaces
+   * the previous copy, so retries can never corrupt or prematurely finish a file.
+   */
+  handleChunkUpload(
+    fileId: string,
+    chunk: ArrayBuffer,
+    index: number,
+    totalChunks: number,
+    fileInfo: FileInfoInput
+  ): { isComplete: boolean; chunksReceived: number } {
+    if (index >= totalChunks) {
+      throw new UploadError("Chunk index out of range", 400);
     }
 
-    return false;
+    let file = this.files.get(fileId);
+    if (file?.complete) {
+      return { isComplete: true, chunksReceived: file.totalChunks };
+    }
+
+    if (!file) {
+      if (this.usedBytes() + fileInfo.size > MAX_TOTAL_SIZE) {
+        throw new UploadError("File size limit exceeded", 413);
+      }
+      file = {
+        meta: {
+          id: fileId,
+          name: fileInfo.name || "file",
+          type: fileInfo.type || "",
+          size: fileInfo.size,
+          thumbnail: fileInfo.thumbnail ?? null,
+          icon: fileInfo.icon,
+        },
+        totalChunks,
+        chunks: new Array(totalChunks),
+        received: 0,
+        complete: false,
+        lastActivity: Date.now(),
+      };
+      this.files.set(fileId, file);
+    } else if (file.totalChunks !== totalChunks || file.meta.size !== fileInfo.size) {
+      throw new UploadError("File metadata mismatch", 409);
+    }
+
+    if (file.chunks[index] === undefined) file.received++;
+    file.chunks[index] = chunk;
+    file.lastActivity = Date.now();
+
+    if (file.received < totalChunks) {
+      return { isComplete: false, chunksReceived: file.received };
+    }
+
+    const storedBytes = file.chunks.reduce((acc, c) => acc + (c?.byteLength ?? 0), 0);
+    if (storedBytes !== file.meta.size) {
+      // Something went wrong – drop the file so the client can retry cleanly
+      this.files.delete(fileId);
+      throw new UploadError("File size mismatch", 409);
+    }
+
+    file.complete = true;
+    this.broadcast();
+    return { isComplete: true, chunksReceived: file.received };
+  }
+
+  /**
+   * Streams a file straight from its in-memory chunks – no copy of the whole
+   * file is made, no matter how many people download it at the same time.
+   */
+  public streamFile(file: StoredFile): ReadableStream<Uint8Array> {
+    const chunks = file.chunks;
+    let i = 0;
+    const source = {
+      // Non-standard workerd option: lets the runtime send Content-Length,
+      // so browsers can show download progress.
+      expectedLength: file.meta.size,
+      pull(controller: ReadableStreamDefaultController<Uint8Array>) {
+        // Skip empty chunks so pull() always enqueues data or closes
+        while (i < chunks.length) {
+          const chunk = chunks[i++];
+          if (chunk && chunk.byteLength > 0) {
+            controller.enqueue(new Uint8Array(chunk));
+            return;
+          }
+        }
+        controller.close();
+      },
+    };
+    return new ReadableStream<Uint8Array>(source);
   }
 
   async alarm(): Promise<void> {
+    // Picker hold expired – drop the persisted session flags
     await this.ctx.storage.deleteAll();
   }
 }
@@ -309,66 +414,69 @@ export const createMessageHubRoutes = (hub: QrrAppDO) => {
     .use("*", async (c, next) => {
       c.set("do", hub);
       if (!hub.initialized) {
-        console.log("Durable Object not initialized yet");
-        const newResponse = new Response("Durable Object not initialized yet", {
+        return new Response("Durable Object not initialized yet", {
           status: 503,
           statusText: "Service Unavailable",
         });
-        return newResponse;
-      } else {
-        return await next();
       }
+      return await next();
     })
     .post("/send", zValidator("json", sendSchema), async (c) => {
       const { message } = c.req.valid("json");
       await hub.send(message);
       return c.json({ success: true });
     })
-    .get("/download/:fileId", async (c) => {
-      const fileId = c.req.param("fileId");
-      const file = hub.files.get(fileId);
+    .get("/download/:fileId", (c) => {
+      const file = hub.getFile(c.req.param("fileId"));
 
-      if (!file) {
+      if (!file || !file.complete) {
         return c.json({ error: "File not found" }, 404);
       }
 
-      const headers = new Headers({
-        "Content-Type": file.type,
-        "Content-Disposition": `attachment; filename="${file.name || "file"}"`,
-        "Content-Length": file.data.byteLength.toString(),
+      return new Response(hub.streamFile(file), {
+        headers: {
+          "Content-Type": file.meta.type || "application/octet-stream",
+          "Content-Disposition": contentDisposition(file.meta.name || "file"),
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
       });
-
-      return new Response(file.data, { headers });
     })
     .post("/upload", zValidator("form", uploadSchema), async (c) => {
-      const { file: fileEntry, thumbnail, icon } = c.req.valid("form");
-
+      // Kept for older cached clients – handled the same way as chunked uploads
+      const { file, thumbnail, icon } = c.req.valid("form");
       const fileId = crypto.randomUUID();
-      const name = fileEntry.name || "file";
-
-      hub.files.set(fileId, {
-        data: await fileEntry.arrayBuffer(),
-        size: fileEntry.size,
-        type: fileEntry.type,
-        name,
-        thumbnail: thumbnail || null,
-        icon: icon || undefined,
-      });
-
-      hub.broadcast();
-
+      try {
+        hub.handleChunkUpload(fileId, await file.arrayBuffer(), 0, 1, {
+          name: file.name || "file",
+          type: file.type,
+          size: file.size,
+          thumbnail: thumbnail || null,
+          icon,
+        });
+      } catch (e) {
+        if (e instanceof UploadError) return c.json({ error: e.message }, e.status);
+        throw e;
+      }
       return c.json({ fileId });
     })
     .post("/upload-chunk", zValidator("form", chunkUploadSchema), async (c) => {
       const { chunk, fileId, index, totalChunks, fileInfo } = c.req.valid("form");
-      const chunkData = await chunk.arrayBuffer();
-      const isComplete = await hub.handleChunkUpload(fileId, chunkData, index, totalChunks, fileInfo);
-
-      return c.json({ 
-        success: true, 
-        isComplete,
-        chunksReceived: hub.fileChunks.get(fileId)?.receivedChunks || 0,
-      });
+      try {
+        const result = hub.handleChunkUpload(
+          fileId,
+          await chunk.arrayBuffer(),
+          index,
+          totalChunks,
+          fileInfo
+        );
+        return c.json({ success: true, ...result });
+      } catch (e) {
+        if (e instanceof UploadError) {
+          return c.json({ success: false, error: e.message }, e.status);
+        }
+        throw e;
+      }
     })
     .get("/ws", async (c) => {
       const upgradeHeader = c.req.header("Upgrade");

@@ -3,7 +3,7 @@ import { hc } from "hono/client";
 import type { AppType } from "../server";
 import type { MessageHubRoutes } from "../message-hub-do";
 import SessionManagementModal from "./SessionManagementModal";
-import FileUploader, { FileWithThumbnail } from "./FileUploader";
+import FileUploader, { FileWithThumbnail, MAX_TOTAL_SIZE } from "./FileUploader";
 import { QRCodeDisplay } from "./QRCodeDisplay";
 import { formatCodeWithSpacer } from "../utils/formatCode";
 import { FormatFileSize } from "./FormatFileSize";
@@ -80,10 +80,18 @@ const DurableComponent = ({
 	// sending state
 	const [isSending, setIsSending] = useState(false);
 	const [filesOverLimit, setFilesOverLimit] = useState(0);
+	// User-facing result of the last send (status above is only used for logging)
+	const [notice, setNotice] = useState<{ type: "success" | "error"; text: string } | null>(null);
+	const [hasText, setHasText] = useState(false);
+	const [copied, setCopied] = useState(false);
 
 	const wsRef = useRef<WebSocket | null>(null);
 	const isConnectingRef = useRef(false);
 	const isManualCloseRef = useRef(false);
+	const sessionMissingRef = useRef(false);
+	// Always-current list of selected files (autosend runs from effects with stale closures)
+	const selectedFilesRef = useRef<FileWithThumbnail[]>([]);
+	selectedFilesRef.current = selectedFiles;
 
 	//testreturn useeffect
 	useEffect(() => {
@@ -138,6 +146,7 @@ const DurableComponent = ({
 					const { status, message, files, role, mode } = data;
 
 					if (status?.code === 503) {
+						sessionMissingRef.current = true;
 						setStatus("Session does not exist");
 						setMessage("This session has expired or does not exist. Try creating a new session.");
 						wsRef.current?.close();
@@ -159,7 +168,7 @@ const DurableComponent = ({
 				// Reset the connecting flag when connection closes
 				isConnectingRef.current = false;
 
-				if (status === "Session does not exist") return;
+				if (sessionMissingRef.current) return;
 				if ((++attempts <= maxRetries) && !isManualCloseRef.current) {
 					console.log(`Reconnection attempt (${attempts}/${maxRetries})...`);
 					reconnectTimer = setTimeout(connect, reconnectDelay);
@@ -237,6 +246,7 @@ const DurableComponent = ({
 	useEffect(() => {
 		if (shareTargetMessage && textareaRef.current) {
 			textareaRef.current.value = shareTargetMessage;
+			setHasText(!!shareTargetMessage.trim());
 		}
 	}, [shareTargetMessage]);
 
@@ -263,23 +273,33 @@ const DurableComponent = ({
 		}
 	}, [pickerHold]);
 
-	const { processFiles, uploadProgress } = useFileUpload(code, {
-		onChunkUpload: (name, progress) => {
-			setStatus(`Uploading ${name}: ${Math.round(progress)}%`);
-		},
-	});
+	const { processFiles, uploadProgress } = useFileUpload(code);
 
 	const sendMessageAndFiles = async () => {
 		if (isSending) return;
 
 		try {
 			setIsSending(true);
+			setNotice(null);
 			setStatus("Sending...");
 			const hubClient = getMessageHubClient(code);
 			const message = textareaRef.current?.value || "";
 
-			if (selectedFiles.length > 0) {
-				await processFiles(selectedFiles);
+			const filesToSend = selectedFilesRef.current ?? [];
+			// Check the limit here too – autosend (share target) bypasses the
+			// disabled button and used to upload part of the files, then fail with 413.
+			const alreadyUsed = files.reduce((acc, f) => acc + (f.size || 0), 0);
+			const toSend = filesToSend.reduce((acc, f) => acc + f.size, 0);
+			if (alreadyUsed + toSend > MAX_TOTAL_SIZE) {
+				const overMb = ((alreadyUsed + toSend - MAX_TOTAL_SIZE) / 1024 / 1024).toFixed(1);
+				setNotice({
+					type: "error",
+					text: `The session limit is ${MAX_TOTAL_SIZE / 1024 / 1024} MB – exceeded by ${overMb} MB. Remove some files and send again.`,
+				});
+				return;
+			}
+			if (filesToSend.length > 0) {
+				await processFiles(filesToSend);
 			}
 
 			if (message.trim()) {
@@ -302,39 +322,42 @@ const DurableComponent = ({
 			if (textareaRef.current) {
 				textareaRef.current.value = "";
 			}
+			setHasText(false);
 			setShouldClearFiles(true);
-			// if (isEditableMode) {
-			// 	setClientMode("send");
-			// }
 			setStatus("Sent successfully");
+			setNotice({ type: "success", text: "Sent" });
+			setTimeout(() => setNotice((n) => (n?.type === "success" ? null : n)), 3000);
 		} catch (error) {
-			setStatus(
-				`Error: ${error instanceof Error ? error.message : "Unknown error"}`
-			);
+			const text = error instanceof Error ? error.message : "Unknown error";
+			setStatus(`Error: ${text}`);
+			setNotice({ type: "error", text: `Sending failed: ${text}` });
 			console.error("Error:", error);
 		} finally {
 			setIsSending(false);
 		}
 	};
 
-	const handleDownload = async (fileId: string) => {
-		setStatus("Downloading file...");
+	const handleDownload = (fileId: string) => {
 		try {
 			const file = files.find((f) => f.id === fileId);
-			const fileName = file?.name || "file";
-
-			const downloadUrl = `/${code}/download/${fileId}`;
-			
 			const a = document.createElement("a");
-			a.href = downloadUrl;
-			a.download = fileName;
+			a.href = `/${code}/download/${encodeURIComponent(fileId)}`;
+			a.download = file?.name || "file";
+			a.rel = "noopener";
 			document.body.appendChild(a);
 			a.click();
-			document.body.removeChild(a);
-
-			setStatus("");
+			a.remove();
 		} catch (error) {
 			setStatus(`Download failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	};
+
+	// Browsers block/merge several downloads started in the same tick –
+	// start them one after another with a short pause.
+	const handleDownloadAll = async () => {
+		for (const [i, file] of files.entries()) {
+			if (i > 0) await new Promise((r) => setTimeout(r, 700));
+			handleDownload(file.id);
 		}
 	};
 
@@ -346,6 +369,125 @@ const DurableComponent = ({
 	const handleReset = () => {
 		window.location.href = "/";
 	};
+
+	const copyMessage = async () => {
+		try {
+			await navigator.clipboard.writeText(message);
+		} catch {
+			// Fallback for insecure contexts / older browsers
+			const ta = document.createElement("textarea");
+			ta.value = message;
+			ta.setAttribute("readonly", "");
+			ta.style.position = "fixed";
+			ta.style.opacity = "0";
+			document.body.appendChild(ta);
+			ta.select();
+			document.execCommand("copy");
+			ta.remove();
+		}
+		setCopied(true);
+		setTimeout(() => setCopied(false), 1500);
+	};
+
+	const hasContent = message.trim().length > 0 || files.length > 0;
+
+	/**
+	 * Session content (message + files). In preview mode (sender in "send" mode)
+	 * it is read-only: the other side is the one receiving it.
+	 */
+	const renderSessionContent = (preview: boolean) => (
+		<div className="message-container">
+			{!hasContent && (
+				<div className="wait-message">Waiting for message...</div>
+			)}
+			{message.trim().length > 0 && (
+				<div className="message-row">
+					<div
+						className="received-message"
+						dangerouslySetInnerHTML={{ __html: linkify(message) }}
+					/>
+					<button
+						type="button"
+						title="Copy message"
+						aria-label="Copy message"
+						className={`ghost-button message-copy ${copied ? "copied" : ""}`}
+						onClick={copyMessage}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor" aria-hidden="true">
+							<path d="M360-240q-33 0-56.5-23.5T280-320v-480q0-33 23.5-56.5T360-880h360q33 0 56.5 23.5T800-800v480q0 33-23.5 56.5T720-240H360Zm0-80h360v-480H360v480ZM200-80q-33 0-56.5-23.5T120-160v-560h80v560h440v80H200Zm160-240v-480 480Z" />
+						</svg>
+					</button>
+				</div>
+			)}
+
+			{message.trim().length !== 0 && files.length !== 0 && (
+				<div className="divider"></div>
+			)}
+
+			{!preview && files.length > 1 && (
+				<div className="download-all-container">
+					<button
+						type="button"
+						className="ghost-button download-all"
+						title="Download all files"
+						onClick={handleDownloadAll}
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor" aria-hidden="true">
+							<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z" />
+						</svg>
+						{" "}Download all ({files.length})
+					</button>
+				</div>
+			)}
+			{files.length > 0 && (
+				<div className="files-grid">
+					{files.map((file) => (
+						<div
+							className={`file-card ${preview ? "preview" : ""}`}
+							key={file.id}
+							{...(preview
+								? {}
+								: {
+									role: "button",
+									tabIndex: 0,
+									"aria-label": `Download ${file.name || "file"}`,
+									onClick: () => handleDownload(file.id),
+									onKeyDown: (e: KeyboardEvent) => {
+										if (e.key === "Enter" || e.key === " ") {
+											e.preventDefault();
+											handleDownload(file.id);
+										}
+									},
+								})}
+						>
+							<div className="thumbnail">
+								{file.thumbnail && file.thumbnail !== "undefined" ? (
+									<img src={file.thumbnail} alt="" />
+								) : (
+									<span className="thumbnail-icon">{file.icon}</span>
+								)}
+							</div>
+							<div className="file-card-content">
+								<div className="file-name" title={file.name}>
+									{file.name || "Unnamed file"}
+								</div>
+								<div class="file-info row">
+									<FormatFileSize sizeInBytes={file.size} /> {" • "}{file.type || "unknown type"}
+								</div>
+							</div>
+							{!preview && (
+								<div className="file-download-icon" title="Download file">
+									<svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px" fill="currentColor" aria-hidden="true">
+										<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z" />
+									</svg>
+								</div>
+							)}
+						</div>
+					))}
+				</div>
+			)}
+		</div>
+	);
 
 	function linkify(text: string): string {
 		// Replace special characters with HTML entities (protection against HTML injection)
@@ -399,10 +541,11 @@ const DurableComponent = ({
 			</div>
 			{showSessionModal && <SessionManagementModal onReset={handleReset} />}
 			<div className="modal durable-component">
-				<div className="mode-switcher">
+				<div className="mode-switcher" role="group" aria-label="Session mode">
 					<button
 						className={clientMode === "send" ? "active" : ""}
 						disabled={!isEditableMode}
+						title={isEditableMode ? undefined : "Only the person who created the session can change the mode"}
 						onClick={() => setClientMode("send")}
 					>
 						<span>Send</span>
@@ -410,6 +553,7 @@ const DurableComponent = ({
 					<button
 						className={(clientMode === "auto" ? "active" : "") + " middle"}
 						disabled={!isEditableMode}
+						title={isEditableMode ? undefined : "Only the person who created the session can change the mode"}
 						onClick={() => setClientMode("auto")}
 					>
 						<span>Auto</span>
@@ -417,6 +561,7 @@ const DurableComponent = ({
 					<button
 						className={clientMode === "receive" ? "active" : ""}
 						disabled={!isEditableMode}
+						title={isEditableMode ? undefined : "Only the person who created the session can change the mode"}
 						onClick={() => setClientMode("receive")}
 					>
 						<span>Receive</span>
@@ -426,111 +571,7 @@ const DurableComponent = ({
 				{(clientMode === "receive" || clientMode === "auto") && (
 					<>
 						<h3>Receive</h3>
-						<div className="message-container">
-							{message.trim().length == 0 && files.length == 0 && (
-								<div className="wait-message">Waiting for message...</div>
-							)}
-							{message.trim().length > 0 && (
-								<div className="message-copy">
-									<button
-										title="Copy message"
-										className="ghost-button"
-										onClick={(e: Event) => {
-											navigator.clipboard.writeText(message);
-											const button = e.target as HTMLElement;
-											const buttonElement = button.closest(
-												".ghost-button"
-											) as HTMLElement;
-											buttonElement.classList.add("copied");
-											setTimeout(
-												() => buttonElement.classList.remove("copied"),
-												1500
-											);
-										}}
-									>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											height="24px"
-											viewBox="0 -960 960 960"
-											width="24px"
-											fill="currentColor"
-										>
-											<path d="M360-240q-33 0-56.5-23.5T280-320v-480q0-33 23.5-56.5T360-880h360q33 0 56.5 23.5T800-800v480q0 33-23.5 56.5T720-240H360Zm0-80h360v-480H360v480ZM200-80q-33 0-56.5-23.5T120-160v-560h80v560h440v80H200Zm160-240v-480 480Z" />
-										</svg>
-									</button>
-								</div>
-							)}
-
-							<div
-								id="recieveMessage"
-								dangerouslySetInnerHTML={{ __html: linkify(message) }}
-							/>
-
-							{message.trim().length !== 0 && files.length !== 0 && (
-								<div className="divider"></div>
-							)}
-
-							{files.length > 1 && (
-								<div className="download-all-container">
-									<button
-										className="ghost-button download-all"
-										title="Download all files"
-										onClick={() =>
-											files.forEach((file) => handleDownload(file.id))
-										}
-									>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											height="24px"
-											viewBox="0 -960 960 960"
-											width="24px"
-											fill="currentColor"
-										>
-											<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z" />
-										</svg>
-										{""}({files.length})
-									</button>
-								</div>
-							)}
-							<div className="files-grid">
-								{files.length > 0
-									? files.map((file) => (
-										<div
-											className="file-card"
-											key={file.id}
-											onClick={() => handleDownload(file.id)}
-										>
-											<div className="thumbnail">
-												{file.thumbnail && file.thumbnail !== "undefined" ? (
-													<img src={file.thumbnail} alt="Thumbnail" />
-												) : (
-													<span className="thumbnail-icon">{file.icon}</span>
-												)}
-											</div>
-											<div className="file-card-content">
-												<div className="file-name" title={file.name}>
-													{file.name || "Unnamed file"}
-												</div>
-												<div class="file-info row">
-													<FormatFileSize sizeInBytes={file.size} /> {" • "}{file.type || "Unknown type"}
-												</div>
-											</div>
-											<div className="file-download-icon" title="Download file">
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													height="24px"
-													viewBox="0 -960 960 960"
-													width="24px"
-													fill="currentColor"
-												>
-													<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z" />
-												</svg>
-											</div>
-										</div>
-									))
-									: ""}
-							</div>
-						</div>
+						{renderSessionContent(false)}
 					</>
 				)}
 
@@ -543,6 +584,10 @@ const DurableComponent = ({
 							id="inputMessage"
 							ref={textareaRef}
 							placeholder="link | message"
+							aria-label="Message text"
+							onInput={(e: Event) =>
+								setHasText(!!(e.target as HTMLTextAreaElement).value.trim())
+							}
 						/>
 						<div>
 							<FileUploader
@@ -565,13 +610,22 @@ const DurableComponent = ({
 							<div className="send-actions">
 								<div>
 									<button onClick={sendMessageAndFiles} className={`primary ${isSending ? "loading" : ""}`}
-										disabled={isSending || filesOverLimit > 0}>
+										disabled={isSending || filesOverLimit > 0 || (!hasText && selectedFiles.length === 0)}>
 										{isSending
 											? "Sending..."
 											: selectedFiles.length > 0
-												? `Send message and files (${selectedFiles.length})`
+												? hasText
+													? `Send message and files (${selectedFiles.length})`
+													: `Send files (${selectedFiles.length})`
 												: "Send message"}
 									</button>
+									<div className="send-notice" role="status" aria-live="polite">
+										{notice && (
+											<span className={notice.type === "error" ? "error-message" : "success-message"}>
+												{notice.text}
+											</span>
+										)}
+									</div>
 									{filesOverLimit > 0 && (
 										<div className="error-message">
 											Limit exceeded by <strong><FormatFileSize sizeInBytes={filesOverLimit} /></strong>.
@@ -581,6 +635,17 @@ const DurableComponent = ({
 							</div>
 						</div>
 					</div>
+				)}
+
+				{/* In "send" mode the sender can't see the receive section –
+				    show a read-only preview of what the other side receives. */}
+				{clientMode === "send" && hasContent && (
+					<>
+						<div className="divider"></div>
+						<h3>Sent</h3>
+						<p className="preview-hint">Preview – the other side can only receive.</p>
+						{renderSessionContent(true)}
+					</>
 				)}
 			</div>
 		</>

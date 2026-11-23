@@ -37,7 +37,7 @@ Scientific research on PNG images sent through WhatsApp confirms that values lik
 | MMS                       | very high | Very blurry, low resolution | ✅ easy | fast | about tens of KB | only small files |
 | Instagram Direct          | high    | Visible artifacts and blurring | ✅ easy for Instagram users | fast | limited | often for stories, expires |
 | E‑mail (standard)         | usually none | depends on server | medium – requires login | medium | usually up to 25MB| spam filters, servers may crop |
-| **qrr.app**               | **none**  | **No compression – original quality** | ✅ very simple (QR / code) | very fast | up to session limit (e.g. 125 MB) | no accounts, no installation |
+| **qrr.app**               | **none**  | **No compression – original quality** | ✅ very simple (QR / code) | very fast | up to session limit (e.g. 80 MB) | no accounts, no installation |
 
 In the case of email, the situation may depend on the provider, most often we don't encounter quality degradation.
 

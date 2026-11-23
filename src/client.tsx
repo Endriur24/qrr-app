@@ -11,6 +11,87 @@ import LeaveSessionModal from "./components/LeaveSessionModal";
 
 export const client = hc<AppType>("/");
 
+// Must match public/service-worker.js
+const SHARE_CACHE = "media-share-v1";
+const SHARE_MANIFEST = "/__share__/manifest";
+
+interface ShareManifest {
+	files: { key: string; name: string; type: string; lastModified: number }[];
+	title: string;
+	text: string;
+	url: string;
+	diag?: {
+		contentType: string;
+		contentLength: string;
+		entries: { field: string; kind: string; name?: string; type?: string; size?: number; length?: number }[];
+	};
+}
+
+/** Reads files/text stored by the service worker and clears the cache */
+/** Sends share-target diagnostics to Sentry (loaded via the loader script) */
+function reportShareProblem(message: string, extra: unknown) {
+	console.warn(message, extra);
+	try {
+		const S = (window as any).Sentry;
+		S?.onLoad?.(() => S.captureMessage(message, { level: "warning", extra: { share: extra } }));
+	} catch {
+		/* ignore */
+	}
+}
+
+async function readSharedContent(): Promise<{ files: File[]; text: string | null; problem: string | null }> {
+	const cache = await caches.open(SHARE_CACHE);
+	const manifestResponse = await cache.match(SHARE_MANIFEST);
+	if (!manifestResponse) {
+		reportShareProblem("Share target: no manifest in cache", { href: location.href });
+		return { files: [], text: null, problem: "No shared data found (the service worker stored nothing)." };
+	}
+
+	const manifest: ShareManifest = await manifestResponse.json();
+	const files: File[] = [];
+	for (const entry of manifest.files) {
+		const response = await cache.match(entry.key);
+		if (!response) continue;
+		const blob = await response.blob();
+		files.push(
+			new File([blob], entry.name, {
+				type: entry.type || blob.type,
+				lastModified: entry.lastModified,
+			})
+		);
+	}
+
+	// Files are now held by the page – free the cache
+	await caches.delete(SHARE_CACHE);
+
+	// Many apps put the URL into "text" as well – avoid duplicates and empty lines.
+	// Some apps (e.g. galleries) pass the file name as title – that's not a message.
+	const fileNames = new Set(files.map((f) => f.name.trim()));
+	const parts = [manifest.title, manifest.text, manifest.url]
+		.map((p) => (p || "").trim())
+		.filter(
+			(p, i, arr) =>
+				p &&
+				!fileNames.has(p) &&
+				arr.indexOf(p) === i &&
+				!(i === 2 && arr[1].includes(p))
+		);
+	let problem: string | null = null;
+	const diag = manifest.diag;
+	if (files.length === 0 || files.some((f) => f.size === 0)) {
+		const summary = diag
+			? diag.entries
+				.map((e) => (e.kind === "file" ? `${e.field}: file "${e.name}" (${e.type || "no type"}, ${e.size} B)` : `${e.field}: text (${e.length} chars)`))
+				.join("; ") || "no fields"
+			: "no diagnostics";
+		problem = files.length === 0
+			? `The app did not pass any file. Received: ${summary}.`
+			: `Some files arrived empty (0 B). Received: ${summary}.`;
+		reportShareProblem("Share target: files missing or empty", { diag, manifestFiles: manifest.files, ua: navigator.userAgent });
+	}
+	return { files, text: parts.length ? parts.join("\n") : null, problem };
+}
+
 function App() {
 	// State management
 	const [currentCode, setCurrentCode] = useState<string | null>(() => {
@@ -45,42 +126,33 @@ function App() {
 		}
 	}, []);
 
-	// ✅ Share Target 
-	window.addEventListener("load", async () => {
-		if (location.search.includes("share-target")) {
-			const url = new URLSearchParams(window.location.search);
-			const fileList = url.get("files");
-			const fileListParsed = fileList ? fileList.split(",") : [];
-			// Set files info for display line by line
-			setFilesInfo(
-				fileListParsed.length > 0
-					? fileListParsed.map((file) => `${file}`).join("\n")
-					: "No files shared"
-			);
-			const keys = await caches.keys();
-			const mediaCache = await caches.open(
-				keys.filter((key) => key.startsWith("media"))[0]
-			);
-			for (const file of fileListParsed) {
-				const response = await mediaCache.match(file);
-				if (response) {
-					const blob = await response.blob();
-					const fileObj = new File([blob], file, { type: blob.type });
-					setSharedFiles((prev) => [...prev, fileObj]);
-					await mediaCache.delete(file);
-				}
-			}
+	// ✅ Share Target – runs once on mount (previously a "load" listener was added
+	// on every render, which could fire several times or not at all).
+	useEffect(() => {
+		const params = new URLSearchParams(window.location.search);
+		const shareTarget = params.get("share-target");
+		if (!shareTarget) return;
+		// Remove share-target params from URL (also prevents re-processing on reload)
+		window.history.replaceState({}, document.title, window.location.pathname);
 
-			const title = url.get("name");
-			const text = url.get("description");
-			const surl = url.get("link");
-			if (title || text || url) {
-				setSharedText(`${title || ""}\n${text || ""}\n${surl || ""}`);
-			}
-			//push state to remove share-target params from URL
-			window.history.replaceState({}, document.title, window.location.pathname);
+		if (shareTarget === "error") {
+			setFilesInfo("Could not receive the shared files. Please try again.");
+			return;
 		}
-	});
+
+		(async () => {
+			try {
+				const { files, text, problem } = await readSharedContent();
+				setFilesInfo([...files.map((f) => f.name), problem].filter(Boolean).join("\n"));
+				// Set files and text in one go so autosend sees a consistent state
+				setSharedText(text);
+				setSharedFiles(files);
+			} catch (error) {
+				console.error("Share target error:", error);
+				setFilesInfo("Could not read the shared files.");
+			}
+		})();
+	}, []);
 
 	// ✅ Handle browser back/forward
 	useEffect(() => {
@@ -231,11 +303,11 @@ function App() {
 					)}
 				</div>
 				{/* Share Target Preview */}
-				{!currentCode && (sharedFiles.length > 0 || sharedText) && (
+				{!currentCode && (sharedFiles.length > 0 || sharedText || filesInfo) && (
 					<div class="shared-content-box">
 						<h4 class="m0">Ready to send:</h4>
-						<div>
-									{filesInfo}
+						<div class={css`white-space: pre-line;`}>
+							{filesInfo}
 							{sharedText && <p>{sharedText}</p>}
 						</div>
 						<div class="divider"></div>

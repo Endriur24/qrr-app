@@ -1,8 +1,9 @@
-import { useState, useEffect } from "hono/jsx";
+import { useState, useEffect, useRef } from "hono/jsx";
 import { FormatFileSize } from "./FormatFileSize";
 
 
-const MAX_TOTAL_SIZE = 125 * 1024 * 1024; // 125MB in bytes
+// Must match MAX_TOTAL_SIZE in message-hub-do.ts (files are kept in server RAM)
+export const MAX_TOTAL_SIZE = 80 * 1024 * 1024;
 
 const formatSize = (bytes: number): string => {
 	if (bytes < 1024) return `${bytes}B`;
@@ -47,6 +48,8 @@ const FileUploader = ({
 	setFilesOverLimit
 }: Props) => {
 	const [selectedFiles, setSelectedFiles] = useState<FileWithThumbnail[]>([]);
+	const selectedFilesRef = useRef<FileWithThumbnail[]>([]);
+	selectedFilesRef.current = selectedFiles;
 	const [isDragging, setIsDragging] = useState(false);
 	const [totalSize, setTotalSize] = useState(0);
 	const [remainingSize, setRemainingSize] = useState(MAX_TOTAL_SIZE);
@@ -63,8 +66,8 @@ const FileUploader = ({
 
 	useEffect(() => {
 		const freeSpace = remainingSize - totalSize;
-		setFilesOverLimit(-freeSpace);
-	}, [totalSize]);
+		setFilesOverLimit(Math.max(0, -freeSpace));
+	}, [totalSize, remainingSize]);
 
 	// Clear files when shouldClear prop changes to true
 	useEffect(() => {
@@ -77,17 +80,7 @@ const FileUploader = ({
 	useEffect(() => {
 		if (shareTargetFiles && shareTargetFiles.length > 0) {
 			console.log("Processing shareTargetFiles:", shareTargetFiles.length, "files");
-			// Convert File[] to FileList-compatible object
-			const fileList = Object.create(shareTargetFiles, {
-				item: { value: (index: number) => shareTargetFiles[index] },
-				length: { value: shareTargetFiles.length },
-				[Symbol.iterator]: {
-					value: function* () {
-						yield* shareTargetFiles;
-					},
-				},
-			});
-			handleFiles(fileList as FileList);
+			handleFiles(shareTargetFiles);
 		}
 	}, [shareTargetFiles]);
 
@@ -125,8 +118,9 @@ const FileUploader = ({
 				icon = getFallbackIcon(fileType);
 			}
 		} catch (error) {
-			console.error("Error extracting thumbnail:", error);
-			icon = "📎";
+			console.warn("Thumbnail not available for", file.name, error);
+			thumbnail = null;
+			icon = fileType.startsWith("image/") ? "🖼️" : fileType.startsWith("video/") ? "🎬" : "📎";
 		}
 
 		return {
@@ -141,80 +135,95 @@ const FileUploader = ({
 		};
 	};
 
-	const extractImageThumbnail = (file: File): Promise<string> => {
-		return new Promise((resolve) => {
-			const canvas = document.createElement("canvas");
-			const ctx = canvas.getContext("2d")!;
+	const THUMB_SIZE = 80;
+	const THUMB_TIMEOUT_MS = 4000;
+
+	/** Draws source into a square canvas keeping aspect ratio */
+	const drawThumbnail = (
+		source: CanvasImageSource,
+		width: number,
+		height: number
+	): string => {
+		const canvas = document.createElement("canvas");
+		canvas.width = THUMB_SIZE;
+		canvas.height = THUMB_SIZE;
+		const ctx = canvas.getContext("2d")!;
+		const aspectRatio = width / height || 1;
+		const drawWidth = aspectRatio > 1 ? THUMB_SIZE : THUMB_SIZE * aspectRatio;
+		const drawHeight = aspectRatio > 1 ? THUMB_SIZE / aspectRatio : THUMB_SIZE;
+		ctx.drawImage(
+			source,
+			(THUMB_SIZE - drawWidth) / 2,
+			(THUMB_SIZE - drawHeight) / 2,
+			drawWidth,
+			drawHeight
+		);
+		return canvas.toDataURL("image/jpeg", 0.7);
+	};
+
+	/**
+	 * Runs a thumbnail extractor with a timeout. Unsupported formats (e.g. HEIC,
+	 * some video codecs) never fire load/seeked events – previously this left the
+	 * promise pending forever and the files were never added to the list.
+	 */
+	const withObjectUrl = (
+		file: File,
+		run: (url: string, resolve: (v: string) => void, reject: (e: unknown) => void) => void
+	): Promise<string> => {
+		const url = URL.createObjectURL(file);
+		return new Promise<string>((resolve, reject) => {
+			const timer = setTimeout(() => reject(new Error("Thumbnail timeout")), THUMB_TIMEOUT_MS);
+			run(
+				url,
+				(v) => {
+					clearTimeout(timer);
+					resolve(v);
+				},
+				(e) => {
+					clearTimeout(timer);
+					reject(e);
+				}
+			);
+		}).finally(() => URL.revokeObjectURL(url));
+	};
+
+	const extractImageThumbnail = (file: File): Promise<string> =>
+		withObjectUrl(file, (url, resolve, reject) => {
 			const img = new Image();
-
+			img.decoding = "async";
 			img.onload = () => {
-				const size = 80;
-				canvas.width = size;
-				canvas.height = size;
-
-				const aspectRatio = img.width / img.height;
-				let drawWidth, drawHeight, drawX, drawY;
-
-				if (aspectRatio > 1) {
-					drawWidth = size;
-					drawHeight = size / aspectRatio;
-					drawX = 0;
-					drawY = (size - drawHeight) / 2;
-				} else {
-					drawWidth = size * aspectRatio;
-					drawHeight = size;
-					drawX = (size - drawWidth) / 2;
-					drawY = 0;
+				try {
+					resolve(drawThumbnail(img, img.naturalWidth, img.naturalHeight));
+				} catch (e) {
+					reject(e);
 				}
-
-				ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
-				resolve(canvas.toDataURL("image/jpeg", 0.7));
 			};
-
-			img.src = URL.createObjectURL(file);
+			img.onerror = reject;
+			img.src = url;
 		});
-	};
 
-	const extractVideoThumbnail = (file: File): Promise<string> => {
-		return new Promise((resolve) => {
+	const extractVideoThumbnail = (file: File): Promise<string> =>
+		withObjectUrl(file, (url, resolve, reject) => {
 			const video = document.createElement("video");
-			const canvas = document.createElement("canvas");
-			const ctx = canvas.getContext("2d")!;
-
-			video.addEventListener("loadedmetadata", () => {
-				video.currentTime = Math.min(1, video.duration * 0.1);
-			});
-
-			video.addEventListener("seeked", () => {
-				const size = 80;
-				canvas.width = size;
-				canvas.height = size;
-
-				const aspectRatio = video.videoWidth / video.videoHeight;
-				let drawWidth, drawHeight, drawX, drawY;
-
-				if (aspectRatio > 1) {
-					drawWidth = size;
-					drawHeight = size / aspectRatio;
-					drawX = 0;
-					drawY = (size - drawHeight) / 2;
-				} else {
-					drawWidth = size * aspectRatio;
-					drawHeight = size;
-					drawX = (size - drawWidth) / 2;
-					drawY = 0;
-				}
-
-				ctx.drawImage(video, drawX, drawY, drawWidth, drawHeight);
-				resolve(canvas.toDataURL("image/jpeg", 0.7));
-				URL.revokeObjectURL(video.src);
-			});
-
-			video.src = URL.createObjectURL(file);
 			video.muted = true;
-			video.load();
+			video.playsInline = true;
+			video.preload = "metadata";
+			video.addEventListener("loadedmetadata", () => {
+				video.currentTime = Math.min(1, (video.duration || 0) * 0.1);
+			});
+			video.addEventListener("seeked", () => {
+				try {
+					resolve(drawThumbnail(video, video.videoWidth, video.videoHeight));
+				} catch (e) {
+					reject(e);
+				} finally {
+					video.removeAttribute("src");
+					video.load();
+				}
+			});
+			video.addEventListener("error", () => reject(video.error));
+			video.src = url;
 		});
-	};
 
 	const getFallbackIcon = (fileType: string): string => {
 		const icons: { [key: string]: string } = {
@@ -237,49 +246,41 @@ const FileUploader = ({
 		return icons[fileType] || "📎";
 	};
 
-	const handleFiles = async (files: FileList) => {
+	const handleFiles = async (files: FileList | File[]) => {
 		onPickerHoldChange(false);
 		onStatusChange?.("Processing files...");
 
-		const newFiles: FileWithThumbnail[] = [];
-		let newTotalSize = totalSize;
+		// Use refs – this function is also called from effects / async callbacks
+		// where the captured state may already be stale.
+		const current = selectedFilesRef.current ?? [];
+		const seen = new Set(current.map((f) => `${f.name}|${f.size}`));
+		const toProcess: File[] = [];
 		let duplicatesFound = false;
 
-		for (let file of files) {
-			// Check for duplicates by comparing name and size
-			const isDuplicate = selectedFiles.some(
-				(existingFile) =>
-					existingFile.name === file.name && existingFile.size === file.size
-			);
-
-			if (isDuplicate) {
+		for (const file of Array.from(files)) {
+			const key = `${file.name}|${file.size}`;
+			if (seen.has(key)) {
 				duplicatesFound = true;
 				continue;
 			}
-
-			// if (newTotalSize + file.size > remainingSize) {
-			// 	onStatusChange?.(
-			// 		`Cannot add more files. Size limit is ${formatSize(remainingSize)}`
-			// 	);
-			// 	return;
-			// }
-
-			const processedFile = await extractThumbnail(file);
-			processedFile.progress = 0;
-			processedFile.uploading = false;
-			newFiles.push(processedFile);
-			newTotalSize += file.size;
+			seen.add(key);
+			toProcess.push(file);
 		}
 
 		if (duplicatesFound) {
 			onStatusChange?.("Duplicate files were skipped");
 		}
 
-		if (newFiles.length === 0) {
+		if (toProcess.length === 0) {
 			return;
 		}
 
-		const updatedFiles = [...selectedFiles, ...newFiles];
+		// Thumbnails in parallel (each one has its own timeout)
+		const newFiles = await Promise.all(toProcess.map(extractThumbnail));
+
+		const updatedFiles = [...(selectedFilesRef.current ?? []), ...newFiles];
+		const newTotalSize = updatedFiles.reduce((acc, f) => acc + f.size, 0);
+		selectedFilesRef.current = updatedFiles;
 		setSelectedFiles(updatedFiles);
 		setTotalSize(newTotalSize);
 		onFilesChange?.(updatedFiles);
@@ -287,7 +288,6 @@ const FileUploader = ({
 			`Using ${formatSize(newTotalSize)} of ${formatSize(remainingSize)}`
 		);
 		onAllFilesProcessed?.();
-		console.log("All files processed");
 	};
 
 	const handleDrop = (e: {
@@ -302,38 +302,23 @@ const FileUploader = ({
 	};
 
 	const removeFile = (indexToRemove: number) => {
-		setSelectedFiles((prev) => {
-			const removedFile = prev[indexToRemove];
-			const newFiles = prev.filter((_, index) => index !== indexToRemove);
-			const newTotalSize = totalSize - removedFile.size;
-			setTotalSize(newTotalSize);
-			onFilesChange?.(newFiles);
-			onStatusChange?.(
-				`Using ${formatSize(newTotalSize)} of ${formatSize(remainingSize)}`
-			);
-			return newFiles;
-		});
+		const newFiles = (selectedFilesRef.current ?? []).filter((_, index) => index !== indexToRemove);
+		const newTotalSize = newFiles.reduce((acc, f) => acc + f.size, 0);
+		selectedFilesRef.current = newFiles;
+		setSelectedFiles(newFiles);
+		setTotalSize(newTotalSize);
+		onFilesChange?.(newFiles);
+		onStatusChange?.(
+			`Using ${formatSize(newTotalSize)} of ${formatSize(remainingSize)}`
+		);
 	};
 
 	const clearFiles = () => {
+		selectedFilesRef.current = [];
 		setSelectedFiles([]);
 		setTotalSize(0);
 		onFilesChange?.([]);
 		onStatusChange?.("");
-	};
-
-	const updateFileProgress = (fileIndex: number, progress: number) => {
-		setSelectedFiles((prev) => {
-			const updatedFiles = [...prev];
-			if (updatedFiles[fileIndex]) {
-				updatedFiles[fileIndex] = {
-					...updatedFiles[fileIndex],
-					progress,
-					uploading: progress < 100,
-				};
-			}
-			return updatedFiles;
-		});
 	};
 
 	const onfileinputClick = (e: { stopPropagation: () => void }) => {
@@ -368,7 +353,8 @@ const FileUploader = ({
 					accept="*/*"
 					onChange={(e) => {
 						const input = e.target as HTMLInputElement;
-						if (input.files) handleFiles(input.files);
+						if (input.files) handleFiles(Array.from(input.files));
+						input.value = "";
 					}}
 					style={{ display: "none" }}
 				/>

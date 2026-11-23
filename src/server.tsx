@@ -20,6 +20,10 @@ const appType = app
 	.get("/debug-sentry", () => {
 		throw new Error("My first Sentry error!");
 	})
+	// Share Target is normally handled by the service worker. If the SW is not
+	// active (first launch, update in progress) the POST reaches the server –
+	// redirect back instead of showing a 404.
+	.post("/receive-files/", (c) => c.redirect("/?share-target=error", 303))
 	.get("/:id", (c) =>
 
 		!/^\d{6}$/.test(c.req.param("id"))

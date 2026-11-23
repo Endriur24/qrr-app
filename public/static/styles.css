@@ -679,15 +679,87 @@ select::-ms-expand {
 	justify-content: center;
 }
 
-.recieveMessage {
-	margin: 0.5em 0 1.5em 0em;
+/* Message + copy button side by side – the button no longer overlaps text */
+.message-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.5em;
+}
+
+.received-message {
+	flex: 1;
+	min-width: 0;
+	margin: 0.25em 0 0.5em;
+	/* keep line breaks of multi-line messages, wrap very long links */
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
 .message-copy {
-	position: absolute;
-	top: 0;
-	right: 0;
+	flex: none;
 	padding: 0.5em;
+	margin: -0.25em -0.5em 0 0;
+}
+
+/* Tooltip to the left of the button – it sits at the right edge, so a
+   centered tooltip overflowed the viewport on phones */
+.message-copy.copied::after {
+	top: 50%;
+	left: auto;
+	right: 100%;
+	transform: translateY(-50%);
+	margin-right: 0.25em;
+	width: max-content;
+	white-space: nowrap;
+	text-transform: none;
+	letter-spacing: normal;
+	font-weight: normal;
+}
+
+.preview-hint {
+	margin: -0.5em 0 0.75em;
+	font-size: 0.85em;
+	color: var(--color-fg-muted);
+}
+
+.file-card.preview {
+	cursor: default;
+}
+
+.file-card.preview:hover {
+	transform: none;
+	box-shadow: none;
+}
+
+.file-card:focus-visible {
+	outline: 2px solid var(--color-hi);
+	outline-offset: 2px;
+}
+
+.send-notice {
+	min-height: 1.4em;
+	margin-top: 0.5em;
+	font-size: 0.9em;
+	text-align: right;
+}
+
+.error-message {
+	color: #c62828;
+	margin-top: 0.5em;
+	font-size: 0.9em;
+	text-align: right;
+}
+
+.success-message {
+	color: #2e7d32;
+}
+
+[data-theme="dark"] .error-message {
+	color: #ef9a9a;
+}
+
+[data-theme="dark"] .success-message {
+	color: #a5d6a7;
 }
 
 .ghost-button {
@@ -717,7 +789,7 @@ select::-ms-expand {
 }
 
 .ghost-button.copied::after {
-	content: "Skopiowano";
+	content: "Copied";
 	position: absolute;
 	top: -100%;
 	left: 50%;
@@ -868,6 +940,13 @@ input[type="file"] {
 	display: flex;
 	flex-direction: column;
 	align-items: end;
+}
+
+.download-all {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25em;
+	font-size: 0.9em;
 }
 
 .upload-area {
