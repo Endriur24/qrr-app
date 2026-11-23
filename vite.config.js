@@ -7,9 +7,10 @@ export default defineConfig(() => {
         jsxImportSource: "hono/jsx/dom",
       },
       build: {
+        // Don't wipe dist/ – Eleventy output lives there too
+        emptyOutDir: false,
         rollupOptions: {
           input: "./src/client.tsx",
-          emptyOutDir: false,
           watch: {
             include: "src/client.tsx",
           },

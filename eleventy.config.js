@@ -1,6 +1,13 @@
 import { DateTime } from "luxon";
 
 export default function (eleventyConfig) {
+	// page.date = date of the last git commit touching the file (sitemap lastmod, dateModified)
+	eleventyConfig.addGlobalData("date", "git Last Modified");
+
+	eleventyConfig.addFilter("dateDisplay", (dateObj) => {
+		if (!dateObj) return "";
+		return new Date(dateObj).toISOString().split("T")[0];
+	});
 	eleventyConfig.addFilter("httpUrl", (url) => {
 		if (!url) return "/";
 		if (url.startsWith("http")) return url;

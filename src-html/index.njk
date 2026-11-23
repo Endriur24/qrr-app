@@ -1,9 +1,22 @@
 ---
 layout: base.njk
-title: qrr.app - fast file and link sharing via QR code or 6-digit code
-description: The fastest way to send texts, links and files up to 80 MB. Share between any devices. Just scan a QR code or enter a 6-digit code.
+title: qrr.app – share files via QR code, no login needed
+description: Send files up to 80 MB, links and text between your phone and computer. No login or install – just scan a QR code or enter a 6-digit code.
 priority: "1.00"
 changefreq: daily
+faq:
+  - q: Do I need an account or an app?
+    a: No. qrr.app works in the browser on any device. You can optionally install it as an app (PWA) – on Android it then appears in the "Share" menu.
+  - q: How do I send a file from my phone to my computer?
+    a: On the computer, click "New session". On the phone, scan the QR code, or go to qrr.app, choose "I have a code!" and enter the 6-digit code. Pick a file and send it – download it on the computer with one click.
+  - q: What is the file size limit?
+    a: You can send files up to 80 MB in total per session. Texts and links are sent in the same session.
+  - q: Are my files stored anywhere?
+    a: No. Files are kept only in the server's memory for the duration of the session and are never written to disk. When all devices disconnect, the session and its contents disappear.
+  - q: Do photos lose quality?
+    a: No. The original file is sent without compression, so photos and videos keep their full quality.
+  - q: Does it work between iPhone, Android, Windows and Mac?
+    a: Yes. All you need is a modern browser – qrr.app works across any systems, without cables or Bluetooth.
 ---
 
 {% block content %}
@@ -77,6 +90,16 @@ changefreq: daily
       support
     </div>
   </div>
+</section>
+
+<section class="section homepage-only faq">
+  <h2>Frequently asked questions</h2>
+  {%- for item in faq %}
+  <details>
+    <summary>{{ item.q }}</summary>
+    <p>{{ item.a }}</p>
+  </details>
+  {%- endfor %}
 </section>
 
 <section class="section homepage-only">

@@ -1,5 +1,6 @@
 ---
 title: 5 situations where qrr.app shines – fast file sharing via QR
+published: 2026-05-10
 link_title: Where does qrr.app excel? 5 everyday scenarios
 description: Discover 5 scenarios where instant file sharing via QR with qrr.app proves indispensable.
 meta_description: Discover 5 examples of when qrr.app is the fastest way to send a file. No installation, via browser and QR code.

@@ -1,5 +1,6 @@
 ---
 title: How to share a file from Windows to iPhone? qrr.app works instantly
+published: 2026-05-10
 link_title: How to share a file from Windows to iPhone?
 description: Learn how to easily share files between systems — without cables, apps, or accounts.
 layout: blog.njk

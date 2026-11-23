@@ -1,5 +1,6 @@
 ---
 title: qrr.app at work, school, and home – usage scenarios
+published: 2026-05-10
 link_title: qrr.app usage scenarios at work, school, and home
 description: See how instant QR file sharing can simplify everyday life – at work, at university, and at home.
 meta_description: Discover practical uses for qrr.app – a browser-based file sharing tool. At home, work, and school it works instantly – no app needed.

@@ -1,5 +1,6 @@
 ---
 title: Why asking "Send it to me on Messenger" doesn't always work? And what instead?
+published: 2026-05-10
 link_title: Problems with messenger file sharing? We have a better way
 description: Files and photos shared through messengers often lose quality or don't open. See what works better.
 meta_description: Messenger, WhatsApp, or Instagram aren't the best places for file sharing. Find out why and discover a no-registration alternative.

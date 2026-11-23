@@ -1,5 +1,6 @@
 ---
 title: Why files sent by email often end up in spam?
+published: 2026-05-10
 link_title: When attachments end up in spam – what to do?
 description: Emails with attachments often don't reach the recipient. Find out why and discover a way to instantly share files without spam issues.
 meta_description: Sending a file by email and the recipient claims they got nothing? It's a common problem. See why emails end up in spam and how to prevent it.

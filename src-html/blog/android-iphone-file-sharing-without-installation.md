@@ -1,5 +1,6 @@
 ---
 title: Share files between Android and iPhone without installation - how qrr.app works
+published: 2026-05-10
 link_title: File sharing between Android and iPhone without installation
 description: Simple, fast, and seamless file sharing between different operating systems.
 meta_description: Learn how to quickly share files between Android and iPhone without installation using qrr.app - a browser-based tool.

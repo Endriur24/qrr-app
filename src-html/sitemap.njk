@@ -12,7 +12,7 @@ sitemapIgnore: true
 {%- if item.data.sitemapIgnore !== true %}
   <url>
     <loc>{{ item.url | httpUrl }}</loc>
-    <lastmod>{{ item.date | dateDisplayNow("toISOString") | default("") }}</lastmod>
+    <lastmod>{{ item.date | dateDisplay }}</lastmod>
     <changefreq>{{ item.data.changefreq | valueIfEmpty("weekly") }}</changefreq>
     <priority>{{ item.data.priority | valueIfEmpty("0.80") }}</priority>
   </url>

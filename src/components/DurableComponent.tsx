@@ -626,7 +626,7 @@ const DurableComponent = ({
 											</span>
 										)}
 									</div>
-									{filesOverLimit > 0 && (
+									{filesOverLimit > 0 && notice?.type !== "error" && (
 										<div className="error-message">
 											Limit exceeded by <strong><FormatFileSize sizeInBytes={filesOverLimit} /></strong>.
 										</div>

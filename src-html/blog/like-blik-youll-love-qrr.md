@@ -1,5 +1,6 @@
 ---
 title: Know BLIK? You'll love qrr.app – sharing files, links, and texts made easy
+published: 2026-05-10
 link_title: Know BLIK? You'll love qrr.app
 description: If you use BLIK for payments, you'll love the simplicity of qrr.app for sharing files, links, and texts.
 meta_description: BLIK revolutionized payments with a single code. qrr.app does the same for files, links, and messages. See how it works.

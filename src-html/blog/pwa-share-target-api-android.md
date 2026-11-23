@@ -1,5 +1,6 @@
 ---
 title: Use qrr.app as a PWA on Android – even faster sharing with Share Target API
+published: 2026-05-10
 link_title: qrr.app PWA and Share Target API on Android
 description: Install qrr.app as a PWA on Android and share files and text even faster with Share Target API.
 meta_description: Learn how to install qrr.app as a PWA on Android and use Share Target API for lightning-fast file and text sharing.

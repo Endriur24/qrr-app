@@ -1,5 +1,6 @@
 ---
 title: AirDrop? Nearby Share? Or maybe just qrr.app
+published: 2026-05-10
 link_title: AirDrop vs Nearby Share
 description: Real-time file sharing - on every system and without apps.
 layout: blog.njk

@@ -1,5 +1,6 @@
 ---
-title: Why do photos lose quality when shared through messengers? Comparison and alternative
+title: Does Messenger reduce photo quality? Why photos get compressed
+published: 2026-05-10
 link_title: Photo degradation in messengers and emails
 description: See how Messenger, MMS, Instagram Direct, and email compress photos and why qrr.app is a better option.
 meta_description: Find out why photos lose quality when sent through messengers or email, and discover a compression-free alternative – qrr.app.
